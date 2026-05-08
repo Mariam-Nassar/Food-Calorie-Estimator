@@ -1,0 +1,18 @@
+.venv/
+__pycache__/
+.ipynb_checkpoints/
+
+# Generated dataset files
+images/
+data/images/
+train.csv
+val.csv
+test.csv
+notebooks/train.csv
+notebooks/val.csv
+notebooks/test.csv
+notebooks/images/
+
+# Generated model artifacts
+models/*.pth
+models/*.pt
