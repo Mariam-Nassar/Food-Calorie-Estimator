@@ -24,34 +24,30 @@ os.environ.setdefault("TORCH_HOME", str(TORCH_CACHE_DIR))
 
 BATCH_SIZE = int(os.getenv("BATCH_SIZE", "16"))
 CNN_EPOCHS = int(os.getenv("CNN_EPOCHS", "25"))
-TRANSFER_HEAD_EPOCHS = int(os.getenv("TRANSFER_HEAD_EPOCHS", "10"))
-TRANSFER_FINE_TUNE_EPOCHS = int(os.getenv("TRANSFER_FINE_TUNE_EPOCHS", "15"))
+TRANSFER_HEAD_EPOCHS = int(os.getenv("TRANSFER_HEAD_EPOCHS", "20"))
+TRANSFER_FINE_TUNE_EPOCHS = int(os.getenv("TRANSFER_FINE_TUNE_EPOCHS", "50"))
 SEED = 42
 WEIGHT_DECAY = 1e-4
 REUSE_EXISTING_WEIGHTS = os.getenv("REUSE_EXISTING_WEIGHTS", "0") == "1"
+ENSEMBLE_CNN_WEIGHT = 0.25
+ENSEMBLE_MOBILENET_WEIGHT = 0.75
 
 
-class TargetScaler:
-    def __init__(self, mean: float, std: float):
-        self.mean = float(mean)
-        self.std = float(std) if float(std) > 0 else 1.0
-
-    @classmethod
-    def from_series(cls, values: pd.Series):
-        return cls(values.mean(), values.std())
+class LogCalorieTarget:
+    target_type = "log1p"
 
     def transform(self, value: float) -> float:
-        return (float(value) - self.mean) / self.std
+        return float(np.log1p(max(float(value), 0.0)))
 
     def inverse_array(self, values: np.ndarray) -> np.ndarray:
-        return values * self.std + self.mean
+        return np.expm1(values)
 
     def save(self, path: Path) -> None:
-        path.write_text(json.dumps({"mean": self.mean, "std": self.std}, indent=2), encoding="utf-8")
+        path.write_text(json.dumps({"target_type": self.target_type}, indent=2), encoding="utf-8")
 
 
 class NutritionDataset(Dataset):
-    def __init__(self, csv_path: Path, transform=None, target_scaler: TargetScaler | None = None):
+    def __init__(self, csv_path: Path, transform=None, target_scaler: LogCalorieTarget | None = None):
         self.data = pd.read_csv(csv_path)
         self.transform = transform
         self.target_scaler = target_scaler
@@ -192,7 +188,7 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, epochs, s
     return pd.DataFrame(history), time.time() - start
 
 
-def predict(model, loader, device, target_scaler: TargetScaler):
+def predict(model, loader, device, target_scaler: LogCalorieTarget):
     model.eval()
     predictions = []
     targets = []
@@ -207,12 +203,17 @@ def predict(model, loader, device, target_scaler: TargetScaler):
     return targets, predictions
 
 
-def evaluate_regression(model, loader, device, target_scaler: TargetScaler):
-    y_true, y_pred = predict(model, loader, device, target_scaler)
+def regression_metrics(y_true: np.ndarray, y_pred: np.ndarray):
+    y_pred = np.clip(y_pred, 0, None)
     mse = float(np.mean((y_true - y_pred) ** 2))
     rmse = float(np.sqrt(mse))
     mae = float(np.mean(np.abs(y_true - y_pred)))
     return {"MAE": mae, "MSE": mse, "RMSE": rmse, "R2": float(r2_score(y_true, y_pred))}
+
+
+def evaluate_regression(model, loader, device, target_scaler: LogCalorieTarget):
+    y_true, y_pred = predict(model, loader, device, target_scaler)
+    return regression_metrics(y_true, y_pred)
 
 
 def main():
@@ -243,10 +244,9 @@ def main():
         ]
     )
 
-    train_df = pd.read_csv(DATA_DIR / "train.csv")
-    target_scaler = TargetScaler.from_series(train_df["calories"])
+    target_scaler = LogCalorieTarget()
     target_scaler.save(MODEL_DIR / "target_scaler.json")
-    print(f"Target scaler: mean={target_scaler.mean:.2f}, std={target_scaler.std:.2f}")
+    print("Target transform: log1p(calories)")
 
     train_loader = DataLoader(
         NutritionDataset(DATA_DIR / "train.csv", train_transforms, target_scaler),
@@ -333,19 +333,30 @@ def main():
     scratch_cnn.load_state_dict(torch.load(MODEL_DIR / "cnn_from_scratch.pth", map_location=device))
     mobilenet_v2.load_state_dict(torch.load(MODEL_DIR / "mobilenet_v2_finetuned.pth", map_location=device))
 
+    y_true, cnn_pred = predict(scratch_cnn, test_loader, device, target_scaler)
+    _, mobilenet_pred = predict(mobilenet_v2, test_loader, device, target_scaler)
+    ensemble_pred = ENSEMBLE_CNN_WEIGHT * cnn_pred + ENSEMBLE_MOBILENET_WEIGHT * mobilenet_pred
+
     comparison = pd.DataFrame(
         [
             {
                 "model": "CNN from scratch",
                 "trainable_parameters": count_trainable_parameters(scratch_cnn),
                 "training_time_seconds": round(cnn_time, 2),
-                **evaluate_regression(scratch_cnn, test_loader, device, target_scaler),
+                **regression_metrics(y_true, cnn_pred),
             },
             {
                 "model": "MobileNetV2 transfer learning",
                 "trainable_parameters": count_trainable_parameters(mobilenet_v2),
                 "training_time_seconds": round(head_time + fine_time, 2),
-                **evaluate_regression(mobilenet_v2, test_loader, device, target_scaler),
+                **regression_metrics(y_true, mobilenet_pred),
+            },
+            {
+                "model": "Ensemble (25% CNN + 75% MobileNetV2)",
+                "trainable_parameters": count_trainable_parameters(scratch_cnn)
+                + count_trainable_parameters(mobilenet_v2),
+                "training_time_seconds": round(cnn_time + head_time + fine_time, 2),
+                **regression_metrics(y_true, ensemble_pred),
             },
         ]
     )

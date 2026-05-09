@@ -27,6 +27,8 @@ SPLIT_IMAGE_DIR = DATA_DIR / "split_images"
 RESULTS_DIR = PROJECT_ROOT / "results"
 MODELS_DIR = PROJECT_ROOT / "models"
 TARGET_SCALER_PATH = MODELS_DIR / "target_scaler.json"
+ENSEMBLE_CNN_WEIGHT = 0.25
+ENSEMBLE_MOBILENET_WEIGHT = 0.75
 
 MODEL_OPTIONS = {
     "CNN from scratch": {
@@ -36,6 +38,10 @@ MODEL_OPTIONS = {
     "MobileNetV2 transfer learning": {
         "weights": MODELS_DIR / "mobilenet_v2_finetuned.pth",
         "full": MODELS_DIR / "mobilenet_v2_full.pt",
+    },
+    "Ensemble (25% CNN + 75% MobileNetV2)": {
+        "weights": None,
+        "full": None,
     },
 }
 
@@ -63,6 +69,7 @@ def load_dataset() -> pd.DataFrame:
             df["split"] = split
             df["filename"] = df["image_path"].apply(lambda value: Path(value).name)
             df["absolute_path"] = df["image_path"].apply(lambda value: DATA_DIR / value)
+            df = df[df["absolute_path"].apply(lambda path: path.exists())]
             frames.append(df)
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
@@ -106,7 +113,10 @@ def inverse_scaled_prediction(value: float) -> float:
     scaler = load_target_scaler()
     if not scaler:
         return max(0.0, value)
-    prediction = value * float(scaler["std"]) + float(scaler["mean"])
+    if scaler.get("target_type") == "log1p":
+        prediction = float(np.expm1(value))
+    else:
+        prediction = value * float(scaler["std"]) + float(scaler["mean"])
     return max(0.0, prediction)
 
 
@@ -168,6 +178,9 @@ def load_model(model_name: str):
     if torch is None:
         return None, f"PyTorch could not be loaded: {TORCH_IMPORT_ERROR}"
 
+    if model_name.startswith("Ensemble"):
+        return None, "Load the CNN and MobileNetV2 models separately for ensemble prediction."
+
     paths = MODEL_OPTIONS[model_name]
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -195,12 +208,7 @@ def load_model(model_name: str):
     return model.to(device), None
 
 
-def predict_calories(image: Image.Image, model_name: str, comparison: pd.DataFrame):
-    model, error = load_model(model_name)
-    if error:
-        return None, None, error
-
-    device = next(model.parameters()).device
+def image_to_tensor(image: Image.Image, device):
     transform = transforms.Compose(
         [
             transforms.Resize((224, 224)),
@@ -208,11 +216,34 @@ def predict_calories(image: Image.Image, model_name: str, comparison: pd.DataFra
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
         ]
     )
-    tensor = transform(image.convert("RGB")).unsqueeze(0).to(device)
+    return transform(image.convert("RGB")).unsqueeze(0).to(device)
 
+
+def predict_one_model(image: Image.Image, model_name: str):
+    model, error = load_model(model_name)
+    if error:
+        return None, error
+
+    device = next(model.parameters()).device
+    tensor = image_to_tensor(image, device)
     with torch.no_grad():
         raw_prediction = float(model(tensor).cpu().numpy().reshape(-1)[0])
-        prediction = inverse_scaled_prediction(raw_prediction)
+    return inverse_scaled_prediction(raw_prediction), None
+
+
+def predict_calories(image: Image.Image, model_name: str, comparison: pd.DataFrame):
+    if model_name.startswith("Ensemble"):
+        cnn_prediction, cnn_error = predict_one_model(image, "CNN from scratch")
+        mobilenet_prediction, mobilenet_error = predict_one_model(image, "MobileNetV2 transfer learning")
+        if cnn_error:
+            return None, None, cnn_error
+        if mobilenet_error:
+            return None, None, mobilenet_error
+        prediction = ENSEMBLE_CNN_WEIGHT * cnn_prediction + ENSEMBLE_MOBILENET_WEIGHT * mobilenet_prediction
+    else:
+        prediction, error = predict_one_model(image, model_name)
+        if error:
+            return None, None, error
 
     mae = model_mae(model_name, comparison)
     return prediction, mae, None
@@ -381,7 +412,7 @@ with prediction_tab:
                     st.metric("Predicted Calories", metric_text(prediction))
                     st.metric(
                         "Typical Error (MAE)",
-                        "N/A" if mae is None else f"±{mae:.1f} cal",
+                        "N/A" if mae is None else f"+/- {mae:.1f} cal",
                     )
 
             if selected_filename and not dataset.empty:
