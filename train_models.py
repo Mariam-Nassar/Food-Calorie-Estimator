@@ -203,6 +203,7 @@ def predict(model, loader, device, target_scaler: TargetScaler):
             targets.extend(y.numpy().reshape(-1).tolist())
     targets = target_scaler.inverse_array(np.array(targets))
     predictions = target_scaler.inverse_array(np.array(predictions))
+    predictions = np.clip(predictions, 0, None)
     return targets, predictions
 
 

@@ -16,7 +16,7 @@ METADATA_FILES = [
 ]
 
 
-def load_dishes(limit: int = 1500) -> list[tuple[str, float]]:
+def load_dishes(limit: int | None = None) -> list[tuple[str, float]]:
     dishes = []
     for filename in METADATA_FILES:
         with (DATA_DIR / filename).open("r", encoding="utf-8") as file:
@@ -25,7 +25,7 @@ def load_dishes(limit: int = 1500) -> list[tuple[str, float]]:
                 if len(parts) < 2:
                     continue
                 dishes.append((parts[0], float(parts[1])))
-                if len(dishes) >= limit:
+                if limit is not None and len(dishes) >= limit:
                     return dishes
     return dishes
 

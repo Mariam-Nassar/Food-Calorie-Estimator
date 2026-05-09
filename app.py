@@ -78,14 +78,13 @@ def image_count(path: Path) -> int:
     return len(list(path.glob("*.png"))) if path.exists() else 0
 
 
-def confidence_from_mae(prediction: float, model_name: str, comparison: pd.DataFrame) -> Optional[float]:
+def model_mae(model_name: str, comparison: pd.DataFrame) -> Optional[float]:
     if comparison.empty or "MAE" not in comparison.columns:
         return None
     row = comparison[comparison["model"] == model_name]
     if row.empty:
         return None
-    mae = float(row.iloc[0]["MAE"])
-    return float(np.clip(100 * (1 - mae / max(abs(prediction), mae, 1)), 0, 100))
+    return float(row.iloc[0]["MAE"])
 
 
 def dataset_match(filename: Optional[str], dataset: pd.DataFrame) -> pd.DataFrame:
@@ -106,8 +105,9 @@ def load_target_scaler() -> Optional[dict[str, float]]:
 def inverse_scaled_prediction(value: float) -> float:
     scaler = load_target_scaler()
     if not scaler:
-        return value
-    return value * float(scaler["std"]) + float(scaler["mean"])
+        return max(0.0, value)
+    prediction = value * float(scaler["std"]) + float(scaler["mean"])
+    return max(0.0, prediction)
 
 
 if torch is not None:
@@ -214,8 +214,8 @@ def predict_calories(image: Image.Image, model_name: str, comparison: pd.DataFra
         raw_prediction = float(model(tensor).cpu().numpy().reshape(-1)[0])
         prediction = inverse_scaled_prediction(raw_prediction)
 
-    confidence = confidence_from_mae(prediction, model_name, comparison)
-    return prediction, confidence, None
+    mae = model_mae(model_name, comparison)
+    return prediction, mae, None
 
 
 comparison = load_csv(RESULTS_DIR / "model_comparison.csv")
@@ -359,7 +359,7 @@ with prediction_tab:
         with right:
             model_name = st.selectbox("Model", list(MODEL_OPTIONS.keys()))
             if st.button("Estimate Calories", type="primary"):
-                prediction, confidence, error = predict_calories(image, model_name, comparison)
+                prediction, mae, error = predict_calories(image, model_name, comparison)
                 if error:
                     match = dataset_match(selected_filename, dataset)
                     if not match.empty:
@@ -380,8 +380,8 @@ with prediction_tab:
                 else:
                     st.metric("Predicted Calories", metric_text(prediction))
                     st.metric(
-                        "Confidence Estimate",
-                        "N/A" if confidence is None else f"{confidence:.1f}%",
+                        "Typical Error (MAE)",
+                        "N/A" if mae is None else f"±{mae:.1f} cal",
                     )
 
             if selected_filename and not dataset.empty:
