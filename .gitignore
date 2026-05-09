@@ -5,6 +5,7 @@ __pycache__/
 # Generated dataset files
 images/
 data/images/
+data/split_images/
 train.csv
 val.csv
 test.csv
@@ -16,3 +17,7 @@ notebooks/images/
 # Generated model artifacts
 models/*.pth
 models/*.pt
+
+# Local runtime/cache files
+.torch_cache/
+streamlit*.log
