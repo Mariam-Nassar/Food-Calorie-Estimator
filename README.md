@@ -18,6 +18,21 @@ pip install -r requirements.txt
 
 The training notebook saves generated model files under `models/` and result CSV files under `results/`.
 
+This project predicts a continuous calorie value, so it is a regression task. Use MAE, RMSE, and R2 to judge model quality instead of classification accuracy.
+
+You can also train from the command line:
+
+```bash
+python download_images.py
+python train_models.py
+```
+
+For a quick smoke test, reduce epochs with environment variables:
+
+```bash
+CNN_EPOCHS=1 TRANSFER_HEAD_EPOCHS=1 TRANSFER_FINE_TUNE_EPOCHS=1 python train_models.py
+```
+
 ## Current Results
 
 The latest test comparison is saved in `results/model_comparison.csv`.

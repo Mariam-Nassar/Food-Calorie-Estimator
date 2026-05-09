@@ -1,5 +1,6 @@
 from pathlib import Path
 from typing import Optional
+import json
 
 import numpy as np
 import pandas as pd
@@ -25,6 +26,7 @@ IMAGE_DIR = DATA_DIR / "images"
 SPLIT_IMAGE_DIR = DATA_DIR / "split_images"
 RESULTS_DIR = PROJECT_ROOT / "results"
 MODELS_DIR = PROJECT_ROOT / "models"
+TARGET_SCALER_PATH = MODELS_DIR / "target_scaler.json"
 
 MODEL_OPTIONS = {
     "CNN from scratch": {
@@ -92,6 +94,22 @@ def dataset_match(filename: Optional[str], dataset: pd.DataFrame) -> pd.DataFram
     return dataset[dataset["filename"] == Path(filename).name]
 
 
+def load_target_scaler() -> Optional[dict[str, float]]:
+    if not TARGET_SCALER_PATH.exists():
+        return None
+    try:
+        return json.loads(TARGET_SCALER_PATH.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def inverse_scaled_prediction(value: float) -> float:
+    scaler = load_target_scaler()
+    if not scaler:
+        return value
+    return value * float(scaler["std"]) + float(scaler["mean"])
+
+
 if torch is not None:
     class ScratchCNN(nn.Module):
         def __init__(self):
@@ -114,19 +132,21 @@ if torch is not None:
                 nn.ReLU(),
                 nn.MaxPool2d(kernel_size=2),
             )
+            self.pool = nn.AdaptiveAvgPool2d((1, 1))
             self.regressor = nn.Sequential(
                 nn.Flatten(),
-                nn.Linear(256 * 14 * 14, 512),
+                nn.Linear(256, 128),
                 nn.ReLU(),
-                nn.Dropout(0.5),
-                nn.Linear(512, 128),
+                nn.Dropout(0.35),
+                nn.Linear(128, 64),
                 nn.ReLU(),
-                nn.Dropout(0.25),
-                nn.Linear(128, 1),
+                nn.Dropout(0.2),
+                nn.Linear(64, 1),
             )
 
         def forward(self, x):
             x = self.features(x)
+            x = self.pool(x)
             return self.regressor(x)
 
 
@@ -163,7 +183,14 @@ def load_model(model_name: str):
     else:
         model = build_mobilenet_v2_regressor()
 
-    model.load_state_dict(torch.load(paths["weights"], map_location=device))
+    try:
+        model.load_state_dict(torch.load(paths["weights"], map_location=device))
+    except RuntimeError as exc:
+        return None, (
+            f"Saved weights for {model_name} do not match the current improved architecture. "
+            "Run train_models.py again to regenerate the model files. "
+            f"Details: {exc}"
+        )
     model.eval()
     return model.to(device), None
 
@@ -184,7 +211,8 @@ def predict_calories(image: Image.Image, model_name: str, comparison: pd.DataFra
     tensor = transform(image.convert("RGB")).unsqueeze(0).to(device)
 
     with torch.no_grad():
-        prediction = float(model(tensor).cpu().numpy().reshape(-1)[0])
+        raw_prediction = float(model(tensor).cpu().numpy().reshape(-1)[0])
+        prediction = inverse_scaled_prediction(raw_prediction)
 
     confidence = confidence_from_mae(prediction, model_name, comparison)
     return prediction, confidence, None
