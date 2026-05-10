@@ -24,6 +24,7 @@ PROJECT_ROOT = Path(__file__).parent
 DATA_DIR = PROJECT_ROOT / "data"
 IMAGE_DIR = DATA_DIR / "images"
 SPLIT_IMAGE_DIR = DATA_DIR / "split_images"
+SAMPLE_IMAGES_CSV = DATA_DIR / "sample_images.csv"
 RESULTS_DIR = PROJECT_ROOT / "results"
 MODELS_DIR = PROJECT_ROOT / "models"
 TARGET_SCALER_PATH = MODELS_DIR / "target_scaler.json"
@@ -67,11 +68,29 @@ def load_dataset() -> pd.DataFrame:
         if not df.empty:
             df = df.copy()
             df["split"] = split
+            df["image_path"] = df["image_path"].apply(normalize_image_path)
             df["filename"] = df["image_path"].apply(lambda value: Path(value).name)
             df["absolute_path"] = df["image_path"].apply(lambda value: DATA_DIR / value)
             df = df[df["absolute_path"].apply(lambda path: path.exists())]
             frames.append(df)
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
+
+def normalize_image_path(value: object) -> str:
+    return str(value).replace("\\", "/")
+
+
+@st.cache_data
+def load_sample_dataset() -> pd.DataFrame:
+    df = load_csv(SAMPLE_IMAGES_CSV)
+    if df.empty:
+        return pd.DataFrame()
+    df = df.copy()
+    df["split"] = "sample"
+    df["image_path"] = df["image_path"].apply(normalize_image_path)
+    df["filename"] = df["image_path"].apply(lambda value: Path(value).name)
+    df["absolute_path"] = df["image_path"].apply(lambda value: DATA_DIR / value)
+    return df[df["absolute_path"].apply(lambda path: path.exists())]
 
 
 def metric_text(value: object, decimals: int = 2) -> str:
@@ -253,6 +272,8 @@ comparison = load_csv(RESULTS_DIR / "model_comparison.csv")
 cnn_history = load_csv(RESULTS_DIR / "cnn_training_history.csv")
 mobilenet_history = load_csv(RESULTS_DIR / "mobilenet_v2_training_history.csv")
 dataset = load_dataset()
+sample_dataset = load_sample_dataset()
+known_dataset = pd.concat([dataset, sample_dataset], ignore_index=True)
 
 st.title("Food Calorie Estimator")
 st.caption("Nutrition5k image calorie estimation project")
@@ -363,7 +384,7 @@ with data_tab:
 with prediction_tab:
     st.subheader("Upload or Select a Food Image")
 
-    source = st.radio("Image source", ["Upload image", "Choose from train images"], horizontal=True)
+    source = st.radio("Image source", ["Upload image", "Choose from sample images"], horizontal=True)
     image = None
     selected_filename = None
 
@@ -373,14 +394,27 @@ with prediction_tab:
             selected_filename = uploaded.name
             image = Image.open(uploaded).convert("RGB")
     else:
-        train_df = dataset[dataset["split"] == "train"].copy() if not dataset.empty else pd.DataFrame()
-        if train_df.empty:
-            st.info("No train split images found.")
+        sample_df = sample_dataset.copy()
+        if sample_df.empty:
+            sample_df = dataset.copy()
+
+        if sample_df.empty:
+            st.info("No bundled sample images found.")
         else:
-            labels = train_df["filename"].tolist()
-            selected_filename = st.selectbox("Train image", labels)
-            row = train_df[train_df["filename"] == selected_filename].iloc[0]
-            image = Image.open(DATA_DIR / row["image_path"]).convert("RGB")
+            st.caption(f"{len(sample_df)} bundled images are available in this deployment.")
+            preview_cols = st.columns(5)
+            for index, row in enumerate(sample_df.head(20).itertuples(index=False)):
+                with preview_cols[index % 5]:
+                    st.image(
+                        str(row.absolute_path),
+                        caption=f"{row.dish_id} | {float(row.calories):.1f} cal",
+                        use_container_width=True,
+                    )
+
+            labels = sample_df["filename"].tolist()
+            selected_filename = st.selectbox("Sample image", labels)
+            row = sample_df[sample_df["filename"] == selected_filename].iloc[0]
+            image = Image.open(row["absolute_path"]).convert("RGB")
 
     if image is not None:
         left, right = st.columns([1, 1])
@@ -392,7 +426,7 @@ with prediction_tab:
             if st.button("Estimate Calories", type="primary"):
                 prediction, mae, error = predict_calories(image, model_name, comparison)
                 if error:
-                    match = dataset_match(selected_filename, dataset)
+                    match = dataset_match(selected_filename, known_dataset)
                     if not match.empty:
                         row = match.iloc[0]
                         st.metric("Dataset Calories", metric_text(row["calories"]))
@@ -415,8 +449,8 @@ with prediction_tab:
                         "N/A" if mae is None else f"+/- {mae:.1f} cal",
                     )
 
-            if selected_filename and not dataset.empty:
-                match = dataset_match(selected_filename, dataset)
+            if selected_filename and not known_dataset.empty:
+                match = dataset_match(selected_filename, known_dataset)
                 if not match.empty:
                     row = match.iloc[0]
                     st.divider()
